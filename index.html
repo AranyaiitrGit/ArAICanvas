@@ -392,7 +392,7 @@ body.sb-hidden #menuBtn{display:grid}
     <button class="btn sm" data-base="http://localhost:1234/v1">LM Studio</button>
     <button class="btn sm" data-base="">Custom…</button>
   </div>
-  <div class="frow"><label>API Key <span class="lbl-hint">(tab-scoped, never synced)</span></label><input id="sKey" type="password" placeholder="sk-..." spellcheck="false"></div>
+  <div class="frow"><label>API Key <span class="lbl-hint">(session-only; synced only when cloud backup is encrypted)</span></label><input id="sKey" type="password" placeholder="sk-..." spellcheck="false"></div>
   <div class="frow"><label>Model ID</label><input id="sModel" autocomplete="off" spellcheck="false" placeholder="model id"></div>
   <div class="frow"><div style="display:flex;align-items:center;gap:10px;justify-content:space-between"><label style="margin:0">Available models</label><button class="btn sm" id="fetchModelsBtn">Refresh</button></div>
     <input id="sModelSearch" autocomplete="off" placeholder="Filter models" style="margin-top:7px">
@@ -414,11 +414,27 @@ body.sb-hidden #menuBtn{display:grid}
   <h2 style="font-size:calc(var(--fs) + 1px)">Sync (GitHub Gist)</h2>
   <div class="frow"><label>PAT <span class="lbl-hint">(gist scope only)</span></label><input id="sSyncToken" type="password" placeholder="ghp_..." spellcheck="false"></div>
   <label class="check"><input type="checkbox" id="sSyncRemember"> Remember token on this device</label>
-  <label class="check"><input type="checkbox" id="sSyncAuto"> Auto-push after changes</label>
-  <div class="frow" style="display:flex;gap:8px"><button class="btn sm" id="sSyncPush">Sync now</button><button class="btn sm" id="sSyncPull">Pull now</button></div>
-  <div id="syncStatus" class="models-status">Not synced.</div>
+  <label class="check"><input type="checkbox" id="sSyncAuto"> Automatically sync changes (and check on return)</label>
+  <div class="frow"><label>Gist ID <span class="lbl-hint">(optional — automatically found using the same PAT)</span></label><input id="sSyncGist" autocomplete="off" spellcheck="false" placeholder="Automatic discovery, or paste the desktop Gist ID"></div>
+  <label class="check"><input type="checkbox" id="sSyncEncrypt"> Encrypt cloud backup and sync API key</label>
+  <div class="frow"><label>Backup passphrase <span class="lbl-hint">(only required for encrypted sync; not saved to disk)</span></label><input id="sSyncPass" type="password" autocomplete="new-password" placeholder="Same passphrase on desktop and mobile"></div>
+  <p class="models-status" style="margin:-4px 0 12px">Plain Gists exclude your API key. Encrypted Gists include the API key and require a passphrase on every new browser session. An unlisted Gist is not private.</p>
+  <div class="frow" style="display:flex;flex-wrap:wrap;gap:8px"><button class="btn sm" id="sSyncDiscover">Find best backup</button><button class="btn sm" id="sSyncPush">Sync now</button><button class="btn sm" id="sSyncPull">Pull now</button></div>
+  <div id="syncStatus" class="models-status" role="status" aria-live="polite">Not synced.</div>
   <div class="mbtns"><button class="btn" id="sCancel">Cancel</button><button class="btn pri" id="sSave">Save</button></div>
   <div class="credit">MiSans by Xiaomi (MiSans IP License) | Intel One Mono (SIL OFL)</div>
+</div></div>
+
+<div class="overlay" id="syncConflictOverlay"><div class="modal" style="max-width:620px">
+  <h2>Sync conflict detected</h2>
+  <p class="research-help" id="syncConflictText" style="margin:0 0 14px;line-height:1.75;color:var(--t2)"></p>
+  <p class="models-status" style="margin-bottom:14px">Merge retains both versions of changed canvases; Use cloud restores the online backup; Keep device uploads this browser's version. Your data is never replaced without an explicit choice.</p>
+  <div class="mbtns" style="flex-wrap:wrap;justify-content:flex-start">
+    <button class="btn" id="syncConflictCancel">Cancel</button>
+    <button class="btn" id="syncConflictCloud">Use cloud</button>
+    <button class="btn" id="syncConflictLocal">Keep device</button>
+    <button class="btn pri" id="syncConflictMerge">Merge copies</button>
+  </div>
 </div></div>
 
 <div class="overlay" id="briefOverlay"><div class="modal">
@@ -482,7 +498,7 @@ var DEF={base:'https://openrouter.ai/api/v1',key:'',model:'openai/gpt-4o-mini',t
   stream:true,theme:'light',fs:14,autoSync:true,autoSugs:true};
 var settings=Object.assign({},DEF,load('rh.settings',{}));
 try{var tk=sessionStorage.getItem('rh.apiKey');if(tk!==null)settings.key=tk;else if(settings.key)sessionStorage.setItem('rh.apiKey',settings.key)}catch(e){}
-function saveSettings(){var p=Object.assign({},settings);delete p.key;save('rh.settings',p);try{sessionStorage.setItem('rh.apiKey',settings.key||'')}catch(e){}}
+function saveSettings(){var p=Object.assign({},settings);delete p.key;delete p._savedFs;save('rh.settings',p);try{sessionStorage.setItem('rh.apiKey',settings.key||'')}catch(e){}if(typeof syncHooksReady!=='undefined'&&syncHooksReady)scheduleSyncPush()}
 saveSettings();
 
 /* ===== state ===== */
@@ -1201,6 +1217,8 @@ function openBoardMenu(btn,b){
 }
 function renderBoard(){
   var b=getBoard();
+  /* DOM references are transient; detached nodes must be rebuilt after switching canvases. */
+  if(b)(b.nodes||[]).forEach(function(n){n._el=null;(n.turns||[]).forEach(function(t){t._el=null})});
   nodesLayer.innerHTML='';edgesSvg.innerHTML='';
   if(!b){updateStarter();return}
   if(b.view&&isFinite(b.view.x)){view={x:b.view.x,y:b.view.y,k:b.view.k||1}}else{view={x:0,y:0,k:1}}
@@ -1405,6 +1423,7 @@ function loadModelsFromForm(force){
   }).then(function(){btn.disabled=false;btn.textContent='Refresh'});
 }
 function openSettings(){
+  settings._savedFs=settings.fs;
   $('#sBase').value=settings.base;$('#sKey').value=settings.key;$('#sModel').value=settings.model;
   $('#sTemp').value=settings.temp;$('#sMax').value=settings.maxTok;$('#sSys').value=settings.sys;
   $('#sStream').value=settings.stream?'1':'0';$('#sTheme').value=settings.theme;
@@ -1414,6 +1433,9 @@ function openSettings(){
   $('#sSyncToken').value=tok?(tok.slice(0,4)+'…stored'):'';
   $('#sSyncRemember').checked=!!(storeOK&&localStorage.getItem('rh.syncToken'));
   $('#sSyncAuto').checked=!!settings.autoSync;
+  $('#sSyncGist').value=syncState.gistId||'';
+  $('#sSyncEncrypt').checked=!!syncState.encrypted;
+  $('#sSyncPass').value=syncPassphrase;
   updateSyncStatus();
   $('#settingsOverlay').classList.add('open');
   renderModelChoices();
@@ -1433,129 +1455,430 @@ document.querySelectorAll('.presets .btn').forEach(function(b){
   };
 });
 $('#sFs').oninput=function(e){settings.fs=+e.target.value;$('#sFsVal').textContent=e.target.value;applyFont()};
-$('#sCancel').onclick=function(){applyFont();$('#settingsOverlay').classList.remove('open')};
+$('#sCancel').onclick=function(){settings.fs=orDef(settings._savedFs,settings.fs);applyFont();$('#settingsOverlay').classList.remove('open')};
 $('#sSave').onclick=function(){
+  var previousToken=getSyncToken();
+  if(!syncCaptureForm())return;
   Object.assign(settings,{base:$('#sBase').value.trim()||DEF.base,key:$('#sKey').value.trim(),
     model:$('#sModel').value.trim()||DEF.model,temp:$('#sTemp').value,maxTok:$('#sMax').value,
     sys:$('#sSys').value,stream:$('#sStream').value==='1',theme:$('#sTheme').value,fs:+$('#sFs').value,
     autoSync:$('#sSyncAuto').checked,autoSugs:$('#sAutoSugs').checked});
-  saveSettings();applyTheme();applyFont();$('#modelLabel').textContent=settings.model;
-  var tok=$('#sSyncToken').value.trim();
-  if(tok&&tok.indexOf('…stored')===-1)setSyncToken(tok,$('#sSyncRemember').checked);
+  delete settings._savedFs;saveSettings();applyTheme();applyFont();$('#modelLabel').textContent=settings.model;
   $('#settingsOverlay').classList.remove('open');toast('Settings saved');
+  /* First-time setup finds the existing desktop Gist before considering creation. */
+  if(!previousToken&&getSyncToken())syncPush(false);
 };
 $('#themeBtn').onclick=function(){settings.theme=settings.theme==='dark'?'light':'dark';saveSettings();applyTheme()};
 
-/* ===== gist sync ===== */
-var syncState={gistId:load('rh.gistId',''),lastSync:load('rh.lastSync',0)};
+/* ===== Cross-device GitHub Gist synchronization (v2) =====
+ * This uses AI Canvas files only; it will not use the AI Studio Gist.
+ * Credentials are included only when the entire backup is encrypted.
+ */
+var SYNC_MAIN_FILE='ai-canvas.json', SYNC_PART_PREFIX='ai-canvas-part-', SYNC_PART_BYTES=320000;
+var syncState={gistId:load('rh.gistId',''),lastSync:load('rh.lastSync',0),baseHash:load('rh.syncBaseHash',''),encrypted:load('rh.syncEncrypt',false)};
+var syncBusy=false,syncApplying=false,syncHooksReady=false,syncPassphrase='',syncTimer=null,syncConflictResolver=null,syncLastCheck=0,syncNeedResync=false;
+
 function getSyncToken(){try{return sessionStorage.getItem('rh.syncToken')||localStorage.getItem('rh.syncToken')||''}catch(e){return''}}
 function setSyncToken(t,remember){
   try{
     if(!t){sessionStorage.removeItem('rh.syncToken');localStorage.removeItem('rh.syncToken');return}
     if(remember){localStorage.setItem('rh.syncToken',t);sessionStorage.removeItem('rh.syncToken')}
     else{sessionStorage.setItem('rh.syncToken',t);localStorage.removeItem('rh.syncToken')}
-  }catch(e){}
+  }catch(e){toast('Browser blocked credential storage')}
 }
 function cleanNode(n){
   return {id:n.id,role:n.role,title:n.title,prompt:n.prompt||null,parent:n.parent||null,
     hue:hueOf(n.hue),x:n.x,y:n.y,w:n.w||380,h:n.h||340,content:n.content||'',reasoning:n.reasoning||'',
     ts:n.ts||0,meta:n.meta?{secs:n.meta.secs,tps:n.meta.tps}:null,kind:n.kind||null,
-    sugs:(n.sugs||[]).slice(),
-    turns:(n.turns||[]).map(function(t){return{q:t.q,content:t.content||'',reasoning:t.reasoning||'',ts:t.ts||0,
-      meta:t.meta?{secs:t.meta.secs,tps:t.meta.tps}:null,sugs:(t.sugs||[]).slice()}})};
+    sugs:Array.isArray(n.sugs)?n.sugs.slice():[],turns:(Array.isArray(n.turns)?n.turns:[]).map(function(t){return {
+      q:t.q||'',content:t.content||'',reasoning:t.reasoning||'',ts:t.ts||0,
+      meta:t.meta?{secs:t.meta.secs,tps:t.meta.tps}:null,sugs:Array.isArray(t.sugs)?t.sugs.slice():[]
+    }})};
 }
 function cleanBoard(b){
   return {id:b.id,title:b.title,created:b.created,brief:b.brief||'',pinned:!!b.pinned,view:b.view||null,
     nodes:(b.nodes||[]).map(cleanNode)};
 }
-function syncData(){
-  return {app:'ai-canvas',v:1,updated:Date.now(),activeId:activeId,
-    settings:{base:settings.base,model:settings.model,temp:settings.temp,maxTok:settings.maxTok,
-      sys:settings.sys,stream:settings.stream,theme:settings.theme,fs:settings.fs,
-      autoSync:settings.autoSync,autoSugs:settings.autoSugs},
-    boards:boards.map(cleanBoard)};
+function syncData(encrypted){
+  var config={};
+  ['base','model','temp','maxTok','sys','stream','theme','fs','autoSync','autoSugs'].forEach(function(k){config[k]=settings[k]});
+  if(encrypted)config.key=settings.key||'';
+  return {app:'ai-canvas',v:2,activeId:activeId,settings:config,boards:boards.map(cleanBoard)};
+}
+function syncValidate(data){
+  if(!data||typeof data!=='object'||Array.isArray(data)||!Array.isArray(data.boards))throw new Error('Invalid AI Canvas backup');
+  if(data.app&&data.app!=='ai-canvas')throw new Error('This backup belongs to a different app');
+  if(data.boards.length>2000)throw new Error('Backup contains too many canvases');
+  data.boards.forEach(function(b){if(!b||!Array.isArray(b.nodes))throw new Error('Corrupt canvas record');
+    if(b.nodes.length>50000)throw new Error('Canvas exceeds safe import limit');
+    b.nodes.forEach(function(n){if(!n||typeof n!=='object'||(n.turns!==undefined&&!Array.isArray(n.turns)))throw new Error('Corrupt snippet record')});
+  });
+  return data;
+}
+function syncNormalize(data){
+  syncValidate(data);
+  var out={app:'ai-canvas',v:2,activeId:data.activeId||null,settings:{},boards:data.boards.map(cleanBoard)};
+  var cfg=data.settings||{};
+  ['base','model','temp','maxTok','sys','stream','theme','fs','autoSync','autoSugs','key'].forEach(function(k){
+    if(Object.prototype.hasOwnProperty.call(cfg,k))out.settings[k]=cfg[k];
+  });
+  return out;
+}
+function syncMeaningful(data){var cfg=data.settings||{};return !!((data.boards||[]).some(function(b){return (b.nodes&&b.nodes.length)||(b.brief&&b.brief.trim())})||
+  (cfg.sys&&cfg.sys!==DEF.sys)||cfg.key);}
+function syncCounts(data){
+  var count=(data.boards||[]).reduce(function(a,b){return a+(b.nodes||[]).length},0);
+  return (data.boards||[]).length+' canvases, '+count+' snippets';
+}
+function syncScore(summary){return (summary.nodes||0)*100+(summary.nonempty||0)*20+(summary.boards||0)}
+function syncSummary(data){return {boards:(data.boards||[]).length,
+  nodes:(data.boards||[]).reduce(function(s,b){return s+(b.nodes||[]).length},0),
+  nonempty:(data.boards||[]).filter(function(b){return (b.nodes||[]).length||(b.brief||'').trim()}).length};}
+function syncHex(bytes){return Array.from(bytes).map(function(v){return v.toString(16).padStart(2,'0')}).join('')}
+function syncCrypto(){if(!window.crypto||!crypto.subtle)throw new Error('Secure HTTPS/localhost context required for encrypted sync')}
+async function syncShaBytes(bytes){syncCrypto();return syncHex(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)))}
+async function syncHash(obj){return syncShaBytes(new TextEncoder().encode(JSON.stringify(syncNormalize(obj))))}
+function syncToBase64(bytes){var a='';for(var i=0;i<bytes.length;i+=8192)a+=String.fromCharCode.apply(null,bytes.subarray(i,i+8192));return btoa(a)}
+function syncFromBase64(s){var raw=atob(s),res=new Uint8Array(raw.length);for(var i=0;i<raw.length;i++)res[i]=raw.charCodeAt(i);return res}
+async function syncDeriveKey(pass,salt){
+  syncCrypto();var base=await crypto.subtle.importKey('raw',new TextEncoder().encode(pass),'PBKDF2',false,['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',salt:salt,iterations:210000,hash:'SHA-256'},base,
+    {name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+}
+async function syncEnvelope(data,encrypted){
+  var summary=syncSummary(data);
+  if(!encrypted)return {format:'ai-canvas-backup-v2',encrypted:false,summary:summary,payload:data};
+  if(!syncPassphrase)throw new Error('Enter a backup passphrase before encrypted sync');
+  syncCrypto();var salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
+  var key=await syncDeriveKey(syncPassphrase,salt);
+  var cipher=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv:iv},key,new TextEncoder().encode(JSON.stringify(data))));
+  return {format:'ai-canvas-backup-v2',encrypted:true,summary:summary,
+    salt:syncToBase64(salt),iv:syncToBase64(iv),cipher:syncToBase64(cipher)};
+}
+async function syncOpenEnvelope(env){
+  if(env&&env.format==='ai-canvas-backup-v2'){
+    if(!env.encrypted)return {data:syncNormalize(env.payload),encrypted:false};
+    if(!syncPassphrase)throw new Error('Cloud backup is encrypted. Enter the same passphrase on this device.');
+    try{
+      var key=await syncDeriveKey(syncPassphrase,syncFromBase64(env.salt));
+      var plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:syncFromBase64(env.iv)},key,syncFromBase64(env.cipher));
+      return {data:syncNormalize(JSON.parse(new TextDecoder().decode(plain))),encrypted:true};
+    }catch(e){throw new Error('Wrong passphrase or corrupted encrypted backup')}
+  }
+  return {data:syncNormalize(env),encrypted:false}; /* legacy v1 plain Gists */
 }
 function updateSyncStatus(msg,isErr){
-  var e=$('#syncStatus');
-  if(msg){e.textContent=msg;e.classList.toggle('error',!!isErr);return}
-  e.classList.remove('error');
-  e.textContent=syncState.gistId?('Gist: '+syncState.gistId+' | Last: '+(syncState.lastSync?new Date(syncState.lastSync).toLocaleString():'never')):'Not synced.';
+  var e=$('#syncStatus');if(!e)return;
+  e.classList.toggle('error',!!isErr);
+  e.textContent=msg|| (syncState.gistId?
+    ('Gist '+syncState.gistId+' · '+(syncState.encrypted?'Encrypted':'Plain')+' · '+(syncState.lastSync?new Date(syncState.lastSync).toLocaleString():'Not yet synced')):
+    'No connected Gist. Use the same GitHub PAT on both devices.');
 }
-function syncPush(){
-  var tok=getSyncToken();
-  if(!tok){toast('Add a GitHub PAT in Settings → Sync');return Promise.resolve()}
-  updateSyncStatus('Pushing…');
-  var body=JSON.stringify(syncData(),null,1);
-  var updating=!!syncState.gistId;
-  var url=updating?('https://api.github.com/gists/'+syncState.gistId):'https://api.github.com/gists';
-  var payload=updating?{files:{'ai-canvas.json':{content:body}}}:
-    {description:'AI Canvas sync',public:false,files:{'ai-canvas.json':{content:body}}};
-  return fetch(url,{method:updating?'PATCH':'POST',
-    headers:{Authorization:'token '+tok,Accept:'application/vnd.github+json','Content-Type':'application/json'},
-    body:JSON.stringify(payload)}).then(function(res){
-    if(!res.ok)return res.text().then(function(t){throw new Error('HTTP '+res.status+' - '+t.slice(0,160))});
-    return res.json();
-  }).then(function(j){
-    if(j&&j.id){syncState.gistId=j.id;save('rh.gistId',syncState.gistId)}
-    syncState.lastSync=Date.now();save('rh.lastSync',syncState.lastSync);
-    updateSyncStatus();toast('Synced to GitHub Gist');
-  }).catch(function(e){
-    updateSyncStatus('Sync failed: '+((e&&e.message)||''),true);toast('Sync failed: '+((e&&e.message)||''));
-  });
+function syncSetGistId(gid){
+  gid=gid||'';
+  if(syncState.gistId!==gid){syncState.baseHash='';save('rh.syncBaseHash','')}
+  syncState.gistId=gid;save('rh.gistId',gid);
+  if($('#sSyncGist'))$('#sSyncGist').value=gid;
+  updateSyncStatus();
 }
-function syncPull(){
-  var tok=getSyncToken();
-  if(!tok){toast('Add a GitHub PAT in Settings → Sync');return Promise.resolve()}
-  if(!syncState.gistId){toast('No gist yet — press Sync now first');return Promise.resolve()}
-  updateSyncStatus('Pulling…');
-  return fetch('https://api.github.com/gists/'+syncState.gistId,
-    {headers:{Authorization:'token '+tok,Accept:'application/vnd.github+json'}}).then(function(res){
-    if(!res.ok)return res.text().then(function(t){throw new Error('HTTP '+res.status+' - '+t.slice(0,160))});
-    return res.json();
-  }).then(function(j){
-    var file=(j.files&&(j.files['ai-canvas.json']||j.files['rabbithole.json']));
-    if(!file||!file.content)throw new Error('sync file missing in gist');
-    var data=JSON.parse(file.content);
-    if(!data||!data.boards)throw new Error('Unrecognized sync format');
-    if(!confirm('Replace local canvases with the synced version?')){updateSyncStatus();return}
-    boards=data.boards.map(function(b){
-      return {id:b.id||uid(),title:b.title||'Untitled',created:b.created||Date.now(),brief:b.brief||'',
-        pinned:!!b.pinned,view:b.view||null,nodes:(b.nodes||[]).map(function(n){
-          return {id:n.id||uid(),role:n.role||'answer',title:n.title||'Untitled',prompt:n.prompt||null,
-            parent:n.parent||null,hue:hueOf(n.hue||0),x:n.x||0,y:n.y||0,w:n.w||380,h:n.h||340,
-            content:n.content||'',reasoning:n.reasoning||'',ts:n.ts||Date.now(),
-            meta:n.meta||null,kind:n.kind||null,sugs:(n.sugs||[]).slice(),
-            turns:(n.turns||[]).map(function(t){return{q:t.q,content:t.content||'',reasoning:t.reasoning||'',
-              ts:t.ts||0,meta:t.meta||null,sugs:(t.sugs||[]).slice()}})};
-        })};
-    });
-    activeId=(data.activeId&&boards.some(function(b){return b.id===data.activeId}))?data.activeId:(boards[0]?boards[0].id:null);
-    if(data.settings){
-      ['base','model','temp','maxTok','sys','stream','theme','fs','autoSync','autoSugs'].forEach(function(k){
-        if(data.settings[k]!==undefined)settings[k]=data.settings[k];
-      });
-      saveSettings();applyTheme();applyFont();$('#modelLabel').textContent=settings.model;
+function syncSetBaseline(hash,encrypted){
+  syncState.baseHash=hash;syncState.lastSync=Date.now();syncState.encrypted=!!encrypted;
+  save('rh.syncBaseHash',hash);save('rh.lastSync',syncState.lastSync);
+  save('rh.syncEncrypt',syncState.encrypted);
+  if($('#sSyncEncrypt'))$('#sSyncEncrypt').checked=syncState.encrypted;
+  updateSyncStatus();
+}
+function scheduleSyncPush(){
+  if(!syncHooksReady||syncApplying||!settings.autoSync||!getSyncToken())return;
+  if(syncBusy){syncNeedResync=true;return}
+  clearTimeout(syncTimer);
+  syncTimer=setTimeout(function(){syncTimer=null;syncPush(true)},13000);
+}
+function syncGithubHeaders(token){return {'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json',
+  'X-GitHub-Api-Version':'2022-11-28'};}
+async function syncGh(token,url,opts){
+  opts=opts||{};
+  var head=Object.assign({},syncGithubHeaders(token),opts.headers||{});
+  var res=await fetch(url,Object.assign({},opts,{headers:head,cache:'no-store'}));
+  if(!res.ok){var message='';try{var j=await res.json();message=j.message||''}catch(e){}
+    throw new Error('GitHub HTTP '+res.status+(message?': '+message:''));}
+  return res.json();
+}
+async function syncFileContent(file,name){
+  if(!file)throw new Error('Missing backup file '+name);
+  if(typeof file.content==='string'&&!file.truncated)return file.content;
+  if(!file.raw_url||!/^https:\/\/gist\.githubusercontent\.com\//.test(file.raw_url))throw new Error('Cannot retrieve truncated Gist file '+name);
+  var res=await fetch(file.raw_url,{cache:'no-store'});
+  if(!res.ok)throw new Error('Gist file download failed for '+name);
+  return res.text();
+}
+async function syncReadBackup(gist){
+  var files=gist&&gist.files||{};
+  var file=files[SYNC_MAIN_FILE]||files['rabbithole.json'];
+  if(!file)throw new Error('This Gist has no AI Canvas backup');
+  var head;
+  try{head=JSON.parse(await syncFileContent(file,file.filename||SYNC_MAIN_FILE))}
+  catch(e){throw new Error('Backup header is invalid: '+e.message)}
+  if(head&&head.format==='ai-canvas-chunks-v2'){
+    if(!Number.isInteger(head.parts)||head.parts<1||head.parts>120)throw new Error('Invalid backup chunk count');
+    var chunks=[];for(var i=0;i<head.parts;i++){
+      var name=SYNC_PART_PREFIX+String(i).padStart(3,'0')+'.txt';
+      chunks.push(syncFromBase64(await syncFileContent(files[name],name)));
     }
-    saveBoards();renderBoards();renderBoard();
-    syncState.lastSync=Date.now();save('rh.lastSync',syncState.lastSync);
-    updateSyncStatus();toast('Pulled from sync');
-  }).catch(function(e){
-    updateSyncStatus('Pull failed: '+((e&&e.message)||''),true);toast('Pull failed: '+((e&&e.message)||''));
+    var size=chunks.reduce(function(s,a){return s+a.length},0);
+    if(size!==head.bytes)throw new Error('Incomplete backup: missing data');
+    var all=new Uint8Array(size),cursor=0;
+    chunks.forEach(function(p){all.set(p,cursor);cursor+=p.length});
+    if((await syncShaBytes(all))!==head.sha256)throw new Error('Backup checksum mismatch');
+    try{head=JSON.parse(new TextDecoder().decode(all))}
+    catch(e){throw new Error('Corrupt chunked backup')}
+  }
+  return syncOpenEnvelope(head);
+}
+async function syncFilesForEnvelope(env,oldGist){
+  var raw=JSON.stringify(env),bytes=new TextEncoder().encode(raw),files={},keep=[];
+  if(bytes.length<600000)files[SYNC_MAIN_FILE]={content:raw};
+  else{
+    var total=Math.ceil(bytes.length/SYNC_PART_BYTES);
+    if(total>120)throw new Error('Backup exceeds Gist capacity. Export a JSON backup instead.');
+    files[SYNC_MAIN_FILE]={content:JSON.stringify({format:'ai-canvas-chunks-v2',parts:total,bytes:bytes.length,
+      sha256:await syncShaBytes(bytes),summary:env.summary||{}})};
+    for(var i=0;i<total;i++){
+      var name=SYNC_PART_PREFIX+String(i).padStart(3,'0')+'.txt';keep.push(name);
+      files[name]={content:syncToBase64(bytes.subarray(i*SYNC_PART_BYTES,(i+1)*SYNC_PART_BYTES))};
+    }
+  }
+  Object.keys(oldGist&&oldGist.files||{}).forEach(function(name){
+    if(name.startsWith(SYNC_PART_PREFIX)&&keep.indexOf(name)<0)files[name]=null;
+  });
+  return files;
+}
+async function syncPeekSummary(gist){
+  var file=gist.files&&(gist.files[SYNC_MAIN_FILE]||gist.files['rabbithole.json']);
+  if(!file)return null;
+  try{
+    var head=JSON.parse(await syncFileContent(file,file.filename||SYNC_MAIN_FILE));
+    if(head.format==='ai-canvas-chunks-v2'||head.format==='ai-canvas-backup-v2')return head.summary||{boards:0,nodes:0,nonempty:0};
+    if(head&&Array.isArray(head.boards))return syncSummary(head);
+  }catch(e){}
+  return null;
+}
+async function discoverGist(token){
+  var candidates=[];
+  for(var page=1;page<=10;page++){
+    var list=await syncGh(token,'https://api.github.com/gists?per_page=100&page='+page);
+    if(!Array.isArray(list))throw new Error('Unexpected GitHub Gist listing');
+    list.forEach(function(g){if(g&&g.files&&(g.files[SYNC_MAIN_FILE]||g.files['rabbithole.json']))candidates.push(g)});
+    if(list.length<100)break;
+  }
+  if(!candidates.length)return null;
+  if(candidates.length>40)throw new Error('Too many AI Canvas backups. Enter the intended desktop Gist ID.');
+  var scored=[];
+  for(var i=0;i<candidates.length;i++){
+    try{
+      var gist=await syncGh(token,'https://api.github.com/gists/'+encodeURIComponent(candidates[i].id));
+      var summary=await syncPeekSummary(gist);
+      if(summary)scored.push({gist:gist,score:syncScore(summary),date:Date.parse(gist.updated_at||0)||0});
+    }catch(e){} /* an invalid duplicate cannot displace a valid backup */
+  }
+  if(!scored.length)throw new Error('Found matching Gists, but none contain a readable backup');
+  scored.sort(function(a,b){return ((b.score>0)?1:0)-((a.score>0)?1:0)||b.date-a.date||b.score-a.score});
+  syncSetGistId(scored[0].gist.id);
+  if(scored.length>1)toast('Found '+scored.length+' backups; chose the latest populated Gist');
+  return scored[0].gist;
+}
+async function syncFindRemote(token,force){
+  if(!force&&syncState.gistId&&syncState.baseHash){
+    try{
+      var selected=await syncGh(token,'https://api.github.com/gists/'+encodeURIComponent(syncState.gistId));
+      if(selected.files&&(selected.files[SYNC_MAIN_FILE]||selected.files['rabbithole.json']))return selected;
+      syncSetGistId('');
+    }catch(e){if(!/GitHub HTTP (403|404)(?:\D|$)/.test(e.message))throw e;syncSetGistId('')}
+  }
+  /* Cached IDs created by older mobile versions may point to empty duplicate Gists. */
+  if(syncState.gistId&&!force&&syncState.baseHash){
+    return syncGh(token,'https://api.github.com/gists/'+encodeURIComponent(syncState.gistId));
+  }
+  if(syncState.gistId&&!force&&syncState.manualGist){
+    return syncGh(token,'https://api.github.com/gists/'+encodeURIComponent(syncState.gistId));
+  }
+  return discoverGist(token);
+}
+function syncApply(data){
+  syncValidate(data);
+  /* Never apply a backup while a model request is changing nodes. */
+  if(boards.some(function(b){return (b.nodes||[]).some(function(n){
+    return !!(n._ac&&!n._ac.signal.aborted)||(n.turns||[]).some(function(t){return !!(t._ac&&!t._ac.signal.aborted)});
+  })}))throw new Error('Stop any active model generations before pulling');
+  syncApplying=true;
+  try{
+    var safe=syncNormalize(data);
+    boards=safe.boards;
+    activeId=boards.some(function(b){return b.id===safe.activeId})?safe.activeId:(boards[0]&&boards[0].id||null);
+    var oldKey=settings.key||'';
+    ['base','model','temp','maxTok','sys','stream','theme','fs','autoSync','autoSugs'].forEach(function(k){
+      if(safe.settings[k]!==undefined)settings[k]=safe.settings[k];
+    });
+    settings.key=Object.prototype.hasOwnProperty.call(safe.settings,'key')?safe.settings.key:oldKey;
+    saveSettings();save('rh.boards',boards);save('rh.active',activeId);
+    applyTheme();applyFont();$('#modelLabel').textContent=settings.model;
+    renderBoards();renderBoard();
+    if($('#settingsOverlay').classList.contains('open')){
+      $('#sBase').value=settings.base;$('#sKey').value=settings.key||'';$('#sModel').value=settings.model;
+      $('#sTemp').value=settings.temp;$('#sMax').value=settings.maxTok;$('#sSys').value=settings.sys;
+      $('#sStream').value=settings.stream?'1':'0';$('#sTheme').value=settings.theme;
+      $('#sFs').value=settings.fs;$('#sFsVal').textContent=settings.fs;
+      $('#sAutoSugs').checked=!!settings.autoSugs;$('#sSyncAuto').checked=!!settings.autoSync;
+    }
+  }finally{syncApplying=false}
+}
+function syncMergeBoards(local,remote){
+  var out=local.map(cleanBoard),existing={};out.forEach(function(b){existing[b.id]=b});
+  remote.forEach(function(b){
+    var copy=cleanBoard(b);
+    if(!existing[copy.id]){out.push(copy);existing[copy.id]=copy;return}
+    if(JSON.stringify(existing[copy.id])===JSON.stringify(copy))return;
+    copy.id=uid();copy.title=(copy.title||'Untitled')+' (cloud copy)';out.push(copy);
+  });
+  return out;
+}
+function syncMergeData(local,remote){
+  var merge=syncNormalize(local);
+  merge.boards=syncMergeBoards(local.boards||[],remote.boards||[]);
+  if(!merge.settings.key&&remote.settings&&remote.settings.key)merge.settings.key=remote.settings.key;
+  return merge;
+}
+function syncConflict(local,remote){
+  return new Promise(function(resolve){
+    var o=$('#syncConflictOverlay');
+    $('#syncConflictText').textContent='This device: '+syncCounts(local)+' · Cloud: '+syncCounts(remote)+'. The copies differ and may include research not found in the other copy.';
+    syncConflictResolver=function(choice){syncConflictResolver=null;o.classList.remove('open');resolve(choice)};
+    o.classList.add('open');
   });
 }
-var scheduleSyncPush=debounce(function(){
-  if(settings.autoSync&&getSyncToken()&&syncState.gistId)syncPush();
-},5000);
-$('#sSyncPush').onclick=function(){
-  var tok=$('#sSyncToken').value.trim();
-  if(tok&&tok.indexOf('…stored')===-1)setSyncToken(tok,$('#sSyncRemember').checked);
-  syncPush();
+['Cancel','Cloud','Local','Merge'].forEach(function(c){
+  $('#syncConflict'+c).onclick=function(){if(syncConflictResolver)syncConflictResolver(c.toLowerCase())};
+});
+$('#syncConflictOverlay').addEventListener('click',function(e){
+  if(e.target===this&&syncConflictResolver)syncConflictResolver('cancel');
+});
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'&&syncConflictResolver){e.preventDefault();e.stopImmediatePropagation();syncConflictResolver('cancel')}
+},true);
+async function syncWrite(token,data,remote,expectedHash,encrypt){
+  /* Recheck immediately before PATCH to avoid overwriting a newly updated remote. */
+  if(remote){
+    var fresh=await syncGh(token,'https://api.github.com/gists/'+encodeURIComponent(remote.id));
+    var opened=await syncReadBackup(fresh);
+    if((await syncHash(opened.data))!==expectedHash)throw new Error('Cloud changed during sync. Retry to reconcile the latest copy.');
+    remote=fresh;
+  }
+  var env=await syncEnvelope(data,encrypt);
+  var files=await syncFilesForEnvelope(env,remote);
+  var body={description:'AI Canvas research backup'+(encrypt?' (encrypted)':''),files:files};
+  if(!remote)body.public=false;
+  var gid=remote&&remote.id;
+  var gist=await syncGh(token,gid?'https://api.github.com/gists/'+encodeURIComponent(gid):'https://api.github.com/gists',
+    {method:gid?'PATCH':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!gist.id)throw new Error('GitHub did not return the Gist ID');
+  syncSetGistId(gist.id);
+  syncSetBaseline(await syncHash(data),encrypt);
+  toast((gid?'Cloud updated':'Cloud backup created')+' · '+syncCounts(data));
+  return true;
+}
+async function syncRun(mode,automatic){
+  if(syncBusy){if(!automatic)toast('Sync already in progress');return false}
+  var token=getSyncToken();if(!token){if(!automatic)toast('Enter a GitHub PAT in Settings first');return false}
+  syncBusy=true;clearTimeout(syncTimer);syncTimer=null;
+  updateSyncStatus('Looking for your AI Canvas Gist…');
+  try{
+    var remote=await syncFindRemote(token,false);
+    if(mode==='find'){
+      if(!remote){updateSyncStatus('No AI Canvas Gist found on this account');return false}
+      var peek=await syncPeekSummary(remote);
+      updateSyncStatus('Found '+remote.id+' · '+(peek?peek.boards+' canvases, '+peek.nodes+' snippets':'backup exists'));
+      return true;
+    }
+    if(!remote){
+      if(mode==='pull'){updateSyncStatus('No cloud backup yet. First press Sync now on desktop.');return false}
+      var first=syncData(!!syncState.encrypted);
+      if(!syncMeaningful(first)){updateSyncStatus('Nothing to upload: create a snippet first.');return false}
+      await syncWrite(token,first,null,null,!!syncState.encrypted);return true;
+    }
+    var opened=await syncReadBackup(remote),remoteData=opened.data;
+    var isEncrypted=opened.encrypted;
+    if(isEncrypted&&!syncState.encrypted)syncState.encrypted=true;
+    var local=syncData(isEncrypted||!!syncState.encrypted);
+    var localHash=await syncHash(local),cloudHash=await syncHash(remoteData);
+    var localUnchanged=!!(syncState.baseHash&&localHash===syncState.baseHash);
+    /* A remote upgrade from plain to encrypted changes the local hash solely by including the API key. */
+    if(!localUnchanged&&isEncrypted&&syncState.baseHash){
+      localUnchanged=(await syncHash(syncData(false)))===syncState.baseHash;
+    }
+    var localHas=syncMeaningful(local),cloudHas=syncMeaningful(remoteData);
+    if(localHash===cloudHash){syncSetGistId(remote.id);syncSetBaseline(cloudHash,isEncrypted);if(!automatic)toast('Already synchronized');return true}
+    var choice='';
+    if(!localHas&&cloudHas)choice='cloud';
+    else if(!cloudHas&&localHas&&mode==='pull')throw new Error('Cloud backup is empty. Nothing has been applied.');
+    else if(!cloudHas&&localHas&&mode==='push')choice='local';
+    else if(syncState.baseHash&&cloudHash===syncState.baseHash&&localHash!==syncState.baseHash&&mode==='push')choice='local';
+    else if(syncState.baseHash&&localUnchanged&&cloudHash!==syncState.baseHash)choice='cloud';
+    else choice=await syncConflict(local,remoteData);
+    if(choice==='cancel'){updateSyncStatus('Sync canceled. No data changed.');return false}
+    if(choice==='cloud'){
+      syncApply(remoteData);syncSetGistId(remote.id);syncSetBaseline(cloudHash,isEncrypted);
+      toast('Restored from cloud · '+syncCounts(remoteData));return true;
+    }
+    if(choice==='merge'){
+      var merged=syncMergeData(local,remoteData);
+      syncApply(merged);
+      await syncWrite(token,merged,remote,cloudHash,isEncrypted||!!syncState.encrypted);
+      return true;
+    }
+    if(choice==='local'){
+      if(isEncrypted&&!syncPassphrase)throw new Error('Passphrase needed to update encrypted backup');
+      await syncWrite(token,local,remote,cloudHash,isEncrypted||!!syncState.encrypted);
+      return true;
+    }
+    return false;
+  }catch(e){
+    updateSyncStatus('Sync failed: '+((e&&e.message)||e),true);
+    if(!automatic)toast('Sync failed: '+((e&&e.message)||e));
+    return false;
+  }finally{syncBusy=false;syncLastCheck=Date.now();if(syncNeedResync){syncNeedResync=false;scheduleSyncPush()}}
+}
+function syncPush(auto){return syncRun('push',!!auto)}
+function syncPull(auto){return syncRun('pull',!!auto)}
+function syncDiscover(){return syncRun('find',false)}
+function syncCaptureForm(){
+  var field=$('#sSyncToken');
+  if(field){var t=field.value.trim();if(t&&!t.endsWith('…stored'))setSyncToken(t,$('#sSyncRemember').checked);
+    else if(getSyncToken())setSyncToken(getSyncToken(),$('#sSyncRemember').checked)}
+  if($('#sSyncPass'))syncPassphrase=$('#sSyncPass').value;
+  var gist=$('#sSyncGist').value.trim();
+  if(gist&&gist!==syncState.gistId){
+    if(!/^[a-f0-9]{8,64}$/i.test(gist)){toast('Enter a valid Gist ID');return false}
+    syncSetGistId(gist);syncState.manualGist=true;
+  }
+  if($('#sSyncEncrypt')){
+    syncState.encrypted=$('#sSyncEncrypt').checked;
+    save('rh.syncEncrypt',syncState.encrypted);
+  }
+  return true;
+}
+$('#sSyncPush').onclick=function(){if(syncCaptureForm())syncPush(false)};
+$('#sSyncPull').onclick=function(){if(syncCaptureForm())syncPull(false)};
+$('#sSyncDiscover').onclick=function(){
+  if(!syncCaptureForm())return;
+  syncState.manualGist=false;syncSetGistId('');syncDiscover();
 };
-$('#sSyncPull').onclick=function(){
-  var tok=$('#sSyncToken').value.trim();
-  if(tok&&tok.indexOf('…stored')===-1)setSyncToken(tok,$('#sSyncRemember').checked);
-  syncPull();
-};
+/* On another device, checking on return pulls newer cloud changes without requiring refresh. */
+function syncCheckOnResume(){
+  if(document.hidden||!settings.autoSync||!getSyncToken()||syncBusy||Date.now()-syncLastCheck<45000)return;
+  syncPull(true);
+}
+document.addEventListener('visibilitychange',syncCheckOnResume);
+window.addEventListener('focus',syncCheckOnResume);
 
 /* ===== brief / help / share ===== */
 $('#briefBtn').onclick=function(){var b=getBoard()||newBoard();$('#rContext').value=b.brief||'';$('#briefOverlay').classList.add('open');$('#rContext').focus()};
@@ -1675,6 +1998,8 @@ function init(){
   if(b.nodes.length&&!b.view)setTimeout(function(){fitAll(true)},260);
 }
 init();
+syncHooksReady=true;
+if(settings.autoSync&&getSyncToken())setTimeout(function(){syncPull(true)},1500);
 </script>
 </body>
 </html>
